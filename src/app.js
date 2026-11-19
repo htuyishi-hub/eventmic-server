@@ -21,6 +21,7 @@ import {
   timingSafeCompare
 } from './auth.js';
 import { getRoomServiceClient } from './roomService.js';
+import { getSessionMetrics } from './metrics.js';
 
 export function createApp() {
   const app = express();
@@ -42,6 +43,7 @@ export function createApp() {
     max: 60,
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => `${req.body?.code || 'global'}:${req.body?.identity || req.body?.pin || req.ip}`,
     message: { code: 'RATE_LIMITED', error: 'Too many auth requests, please try again later' }
   });
 
@@ -307,7 +309,8 @@ export function createApp() {
       principals: principalsList,
       settings: session.settings,
       fairModeActive: fairActive,
-      floorAllow: session.floorAllow
+      floorAllow: session.floorAllow,
+      metrics: getSessionMetrics(code).getSnapshot()
     });
   });
 
@@ -316,7 +319,7 @@ export function createApp() {
     const session = sessions.get(code);
     if (!session) return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
 
-    const { fairMode, fairFromMinutesBeforeEnd, sessionEndsAt } = req.body || {};
+    const { fairMode, fairFromMinutesBeforeEnd, sessionEndsAt, principalConnectMode } = req.body || {};
     if (fairMode !== undefined && ['off', 'auto', 'on'].includes(fairMode)) {
       session.settings.fairMode = fairMode;
     }
@@ -326,8 +329,20 @@ export function createApp() {
     if (sessionEndsAt !== undefined) {
       session.settings.sessionEndsAt = sessionEndsAt ? Number(sessionEndsAt) : null;
     }
+    if (principalConnectMode !== undefined && ['on_demand', 'always'].includes(principalConnectMode)) {
+      session.settings.principalConnectMode = principalConnectMode;
+    }
 
     res.json({ settings: session.settings, fairModeActive: isFairModeActive(session) });
+  });
+
+  app.post('/api/sessions/:code/latency', requireApiAuth(['admin', 'principal', 'attendee']), (req, res) => {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const { grantToAudioMs, role } = req.body || {};
+    if (typeof grantToAudioMs === 'number') {
+      getSessionMetrics(code).recordGrantToAudio(role || req.auth?.role, grantToAudioMs);
+    }
+    res.json({ ok: true });
   });
 
   // 6. Floor Take (Principal or Admin)

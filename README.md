@@ -2,6 +2,9 @@
 
 Backend signaling, room token generation, and floor management service for **EventMic** powered by LiveKit Cloud and Express.
 
+> [!IMPORTANT]
+> **Deployment Architecture**: This server maintains stateful WebSocket connections for presence, Connect-on-Speak signaling, batched queue updates, and server-enforced turn caps. It requires a persistent host (e.g. Render, Railway, Fly.io), NOT a serverless environment like Vercel Serverless Functions.
+
 ---
 
 ## Prerequisites & Setup

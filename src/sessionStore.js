@@ -57,7 +57,8 @@ export function initSession(name) {
     settings: {
       fairMode: 'off', // 'off' | 'auto' | 'on'
       fairFromMinutesBeforeEnd: 15,
-      sessionEndsAt: null
+      sessionEndsAt: null,
+      principalConnectMode: 'on_demand' // 'on_demand' | 'always'
     },
     floorAllow: null // { principalId, expiresAt }
   };
