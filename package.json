@@ -1,0 +1,23 @@
+{
+  "name": "eventmic-server",
+  "version": "1.0.0",
+  "description": "EventMic LiveKit signaling and room management backend",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "livekit-server-sdk": "^2.7.2"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0",
+    "vitest": "^1.6.0"
+  }
+}
