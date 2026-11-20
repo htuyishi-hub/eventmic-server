@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { isSupabaseEnabled, sbSelect, sbInsert } from './supabaseDb.js';
 
 const adminsById = new Map();
 const adminsByEmail = new Map();
@@ -50,7 +51,7 @@ function verifyPassword(password, storedHash) {
   return crypto.timingSafeEqual(derived, keyBuf);
 }
 
-export function registerAdmin({ name, email, password }) {
+export async function registerAdmin({ name, email, password }) {
   const cleanName = String(name || '').trim();
   const cleanEmail = String(email || '').trim().toLowerCase();
   const cleanPass = String(password || '');
@@ -64,9 +65,6 @@ export function registerAdmin({ name, email, password }) {
   if (cleanPass.length < 6) {
     throw Object.assign(new Error('Password must be at least 6 characters'), { status: 400, code: 'BAD_REQUEST' });
   }
-  if (adminsByEmail.has(cleanEmail)) {
-    throw Object.assign(new Error('An account with this email already exists'), { status: 409, code: 'EMAIL_EXISTS' });
-  }
 
   const admin = {
     id: 'adm-' + crypto.randomBytes(6).toString('hex'),
@@ -76,6 +74,32 @@ export function registerAdmin({ name, email, password }) {
     createdAt: Date.now()
   };
 
+  if (isSupabaseEnabled()) {
+    const existing = await sbSelect('dm_admins', `email=eq.${encodeURIComponent(cleanEmail)}&select=id`);
+    if (existing.length > 0) {
+      throw Object.assign(new Error('An account with this email already exists'), { status: 409, code: 'EMAIL_EXISTS' });
+    }
+    try {
+      await sbInsert('dm_admins', {
+        id: admin.id,
+        name: admin.name,
+        email: admin.email,
+        password_hash: admin.passwordHash,
+        created_at: admin.createdAt
+      });
+    } catch (err) {
+      if (err.status === 409) {
+        throw Object.assign(new Error('An account with this email already exists'), { status: 409, code: 'EMAIL_EXISTS' });
+      }
+      throw err;
+    }
+    return { id: admin.id, name: admin.name, email: admin.email };
+  }
+
+  if (adminsByEmail.has(cleanEmail)) {
+    throw Object.assign(new Error('An account with this email already exists'), { status: 409, code: 'EMAIL_EXISTS' });
+  }
+
   adminsById.set(admin.id, admin);
   adminsByEmail.set(admin.email, admin);
   saveToDisk();
@@ -83,16 +107,18 @@ export function registerAdmin({ name, email, password }) {
   return { id: admin.id, name: admin.name, email: admin.email };
 }
 
-export function authenticateAdmin({ email, password }) {
+export async function authenticateAdmin({ email, password }) {
   const cleanEmail = String(email || '').trim().toLowerCase();
+  if (isSupabaseEnabled()) {
+    const rows = await sbSelect('dm_admins', `email=eq.${encodeURIComponent(cleanEmail)}&select=id,name,email,password_hash`);
+    const row = rows[0];
+    if (!row || !verifyPassword(String(password || ''), row.password_hash)) return null;
+    return { id: row.id, name: row.name, email: row.email };
+  }
+
   const admin = adminsByEmail.get(cleanEmail);
   if (!admin || !verifyPassword(String(password || ''), admin.passwordHash)) {
     return null;
   }
   return { id: admin.id, name: admin.name, email: admin.email };
-}
-
-export function getAdminById(id) {
-  const a = adminsById.get(id);
-  return a ? { id: a.id, name: a.name, email: a.email } : null;
 }

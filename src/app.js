@@ -95,9 +95,9 @@ export function createApp() {
   });
 
   // -1. Multi-Admin Accounts (Sign Up / Sign In using API_TOKEN_SECRET JWTs)
-  app.post('/api/admins/register', (req, res) => {
+  app.post('/api/admins/register', async (req, res) => {
     try {
-      const admin = registerAdmin(req.body || {});
+      const admin = await registerAdmin(req.body || {});
       const adminToken = signApiToken({
         role: 'organizer',
         code: '*',
@@ -112,8 +112,8 @@ export function createApp() {
     }
   });
 
-  app.post('/api/admins/login', (req, res) => {
-    const admin = authenticateAdmin(req.body || {});
+  app.post('/api/admins/login', async (req, res) => {
+    const admin = await authenticateAdmin(req.body || {});
     if (!admin) {
       return res.status(401).json({ code: 'UNAUTHORIZED', error: 'Invalid email or password' });
     }
@@ -133,11 +133,15 @@ export function createApp() {
   });
 
   // 0. Scheduled / Recurring Sessions Calendar (Admin)
-  app.get('/api/schedules', requireHostAuth, (req, res) => {
-    res.json(listSchedules(req.admin.id));
+  app.get('/api/schedules', requireHostAuth, async (req, res) => {
+    try {
+      res.json(await listSchedules(req.admin.id));
+    } catch (err) {
+      res.status(500).json({ code: 'DB_ERROR', error: err.message });
+    }
   });
 
-  app.post('/api/schedules', requireHostAuth, (req, res) => {
+  app.post('/api/schedules', requireHostAuth, async (req, res) => {
     const { title, startAt, durationMinutes, recurrence, settings } = req.body || {};
     if (!title || typeof title !== 'string' || title.trim().length < 3 || title.trim().length > 60) {
       return res.status(400).json({ code: 'BAD_REQUEST', error: 'Title must be between 3 and 60 characters' });
@@ -149,21 +153,21 @@ export function createApp() {
     if (recurrence && !VALID_RECURRENCE.includes(recurrence)) {
       return res.status(400).json({ code: 'BAD_REQUEST', error: 'Invalid recurrence' });
     }
-    const item = createSchedule({ ownerId: req.admin.id, title, startAt, durationMinutes, recurrence, settings });
+    const item = await createSchedule({ ownerId: req.admin.id, title, startAt, durationMinutes, recurrence, settings });
     res.status(201).json(item);
   });
 
-  app.delete('/api/schedules/:id', requireHostAuth, (req, res) => {
-    const ok = deleteSchedule(req.params.id, req.admin.id);
+  app.delete('/api/schedules/:id', requireHostAuth, async (req, res) => {
+    const ok = await deleteSchedule(req.params.id, req.admin.id);
     if (!ok) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
     res.json({ ok: true });
   });
 
-  app.post('/api/schedules/:id/start', requireHostAuth, (req, res) => {
-    const sch = getSchedule(req.params.id, req.admin.id);
+  app.post('/api/schedules/:id/start', requireHostAuth, async (req, res) => {
+    const sch = await getSchedule(req.params.id, req.admin.id);
     if (!sch) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
     const session = initSession(sch.title, { code: sch.code, ownerId: req.admin.id, settings: sch.settings });
-    const next = advanceOrRemoveSchedule(sch.id);
+    const next = await advanceOrRemoveSchedule(sch.id, req.admin.id);
     res.status(201).json({
       code: session.code,
       name: session.name,
