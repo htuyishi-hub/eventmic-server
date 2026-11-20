@@ -1,4 +1,5 @@
 import { UNAMBIGUOUS_CHARS } from './codes.js';
+import { avatarStore } from './avatarStore.js';
 
 export const VALID_REASONS = ['question', 'comment', 'compliment', 'clarification'];
 
@@ -58,7 +59,8 @@ export function initSession(name) {
       fairMode: 'off', // 'off' | 'auto' | 'on'
       fairFromMinutesBeforeEnd: 15,
       sessionEndsAt: null,
-      principalConnectMode: 'on_demand' // 'on_demand' | 'always'
+      principalConnectMode: 'on_demand', // 'on_demand' | 'always'
+      photos: 'speaker_only' // 'on' | 'speaker_only' | 'off'
     },
     floorAllow: null // { principalId, expiresAt }
   };
@@ -226,4 +228,5 @@ export function recordSpeakHistoryEnd(session, identity, name, reason) {
  */
 export function clearSessions() {
   sessions.clear();
+  avatarStore.clearAll();
 }

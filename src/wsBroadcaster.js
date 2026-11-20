@@ -1,5 +1,6 @@
 import { getSortedAttendeeQueue, isFairModeActive } from './sessionStore.js';
 import { getSessionMetrics } from './metrics.js';
+import { avatarStore } from './avatarStore.js';
 
 // Map<sessionCode, Map<identity, Set<WebSocket>>>
 export const sessionSockets = new Map();
@@ -132,9 +133,14 @@ function executeQueueBroadcast(session) {
   const attendeeCount = getConnectedAttendeeCount(session.code);
 
   // 1. Send full queue to Admins and Principals
+  const queueWithAvatar = sortedQueue.map(item => ({
+    ...item,
+    ...avatarStore.getAvatarMeta(session.code, item.id)
+  }));
+
   const adminQueueMsg = {
     type: 'queue_update',
-    queue: sortedQueue,
+    queue: queueWithAvatar,
     attendeeCount,
     fairModeActive: fairActive
   };

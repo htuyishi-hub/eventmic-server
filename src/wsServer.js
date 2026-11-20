@@ -12,7 +12,8 @@ import {
   broadcastToRole,
   broadcastToAll,
   scheduleBatchedQueueBroadcast,
-  getConnectedAttendeeCount
+  getConnectedAttendeeCount,
+  sessionSockets
 } from './wsBroadcaster.js';
 import {
   startAttendeeTurnTimer,
@@ -20,6 +21,7 @@ import {
   endTurn
 } from './wsTurnManager.js';
 import { isAllowedOrigin } from './cors.js';
+import { avatarStore } from './avatarStore.js';
 
 export function setupWebSocketServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true });
@@ -79,6 +81,7 @@ export function setupWebSocketServer(httpServer) {
       }
 
       registerSocket(code, identity, ws, role, name);
+      avatarStore.cancelDisconnectCleanup(code, identity);
 
       // Send initial role-filtered state snapshot
       sendInitialState(ws, session, role, identity);
@@ -143,12 +146,30 @@ export function setupWebSocketServer(httpServer) {
     });
 
     ws.on('close', () => {
+      const sessionCode = ws.sessionCode;
+      const identity = ws.identity;
       unregisterSocket(ws);
-      if (ws.sessionCode) {
-        broadcastToRole(ws.sessionCode, 'admin', {
+
+      if (sessionCode && identity) {
+        const codeMap = sessionSockets.get(sessionCode);
+        const hasOtherSockets = codeMap && codeMap.has(identity) && codeMap.get(identity).size > 0;
+        if (!hasOtherSockets) {
+          avatarStore.scheduleDisconnectCleanup(sessionCode, identity, () => {
+            broadcastToAll(sessionCode, {
+              type: 'avatar_deleted',
+              identity,
+              hasAvatar: false,
+              avatarVersion: 0
+            });
+          });
+        }
+      }
+
+      if (sessionCode) {
+        broadcastToRole(sessionCode, 'admin', {
           type: 'attendee_count',
-          count: getConnectedAttendeeCount(ws.sessionCode),
-          metrics: getSessionMetrics(ws.sessionCode).getSnapshot()
+          count: getConnectedAttendeeCount(sessionCode),
+          metrics: getSessionMetrics(sessionCode).getSnapshot()
         });
       }
     });
@@ -168,29 +189,44 @@ function sendInitialState(ws, session, role, identity) {
       type: 'init',
       role,
       selfState: session.floor?.holderId === identity ? 'on_air' : (pos !== -1 ? 'hand_raised' : 'listening'),
+      selfAvatar: avatarStore.getAvatarMeta(session.code, identity),
       floor: session.floor ? {
         name: session.floor.holderName,
         role: session.floor.holderRole,
-        mode: session.floor.mode
+        mode: session.floor.mode,
+        ...avatarStore.getAvatarMeta(session.code, session.floor.holderId)
       } : null,
       position: pos !== -1 ? pos + 1 : 0,
-      attendeeCount
+      attendeeCount,
+      settings: {
+        photos: session.settings?.photos || 'speaker_only'
+      }
     });
   } else {
     // Admin & Principal receive queues, lists, and settings
-    const queue = getSortedAttendeeQueue(session);
+    const queue = getSortedAttendeeQueue(session).map(item => ({
+      ...item,
+      ...avatarStore.getAvatarMeta(session.code, item.id)
+    }));
     sendToSocket(ws, {
       type: 'init',
       role,
       session: { code: session.code, name: session.name, status: session.status },
       queue,
-      floor: session.floor,
-      principalQueue: session.principalQueue,
+      floor: session.floor ? {
+        ...session.floor,
+        ...avatarStore.getAvatarMeta(session.code, session.floor.holderId)
+      } : null,
+      principalQueue: session.principalQueue.map(p => ({
+        ...p,
+        ...avatarStore.getAvatarMeta(session.code, p.id)
+      })),
       principals: Array.from(session.principals.values()).map(p => ({
         id: p.id,
         name: p.name,
         pin: role === 'admin' ? p.pin : undefined,
-        createdAt: p.createdAt
+        createdAt: p.createdAt,
+        ...avatarStore.getAvatarMeta(session.code, p.id)
       })),
       settings: session.settings,
       fairModeActive: fairActive,

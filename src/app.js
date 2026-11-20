@@ -30,6 +30,9 @@ import { validateProductionEnv } from './env.js';
 import { createCorsOptions } from './cors.js';
 import { getRoomServiceClient } from './roomService.js';
 import { getSessionMetrics } from './metrics.js';
+import { avatarStore } from './avatarStore.js';
+import { detectMagicBytes, reencodeAvatar, MAX_AVATAR_BYTES } from './avatarValidation.js';
+import { broadcastToAll } from './wsBroadcaster.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
@@ -40,7 +43,8 @@ export function createApp() {
   const app = express();
 
   app.use(cors(createCorsOptions()));
-  app.use(express.json());
+  app.use(express.json({ limit: '2mb' }));
+  app.use(express.raw({ type: ['image/*', 'application/octet-stream'], limit: '2mb' }));
 
   // Rate limiters
   const sessionCreateLimiter = rateLimit({
@@ -295,6 +299,8 @@ export function createApp() {
     const code = String(req.params.code || '').trim().toUpperCase();
     const revoked = revokePrincipal(code, req.params.id);
     if (!revoked) return res.status(404).json({ code: 'NOT_FOUND', error: 'Principal not found' });
+    avatarStore.deleteAvatar(code, req.params.id);
+    broadcastToAll(code, { type: 'avatar_deleted', identity: req.params.id, hasAvatar: false, avatarVersion: 0 });
     res.json({ ok: true });
   });
 
@@ -331,7 +337,8 @@ export function createApp() {
             name: p.name || 'Attendee',
             state,
             timesSpoken: hist?.count || 0,
-            lastSpokeAt: hist?.lastSpokeAt || null
+            lastSpokeAt: hist?.lastSpokeAt || null,
+            ...avatarStore.getAvatarMeta(code, p.identity)
           };
         });
     } catch {}
@@ -340,7 +347,8 @@ export function createApp() {
       id: p.id,
       name: p.name,
       createdAt: p.createdAt,
-      pin: callerRole === 'admin' ? p.pin : undefined
+      pin: callerRole === 'admin' ? p.pin : undefined,
+      ...avatarStore.getAvatarMeta(code, p.id)
     }));
 
     const spokeHistory = Array.from(session.speakHistory.values()).flatMap(s =>
@@ -349,17 +357,33 @@ export function createApp() {
         name: s.name,
         startedAt: h.startedAt,
         durationSeconds: h.durationSeconds,
-        reason: h.reason
+        reason: h.reason,
+        ...avatarStore.getAvatarMeta(code, s.id)
       }))
     ).sort((a, b) => b.startedAt - a.startedAt);
+
+    const floorWithAvatar = session.floor ? {
+      ...session.floor,
+      ...avatarStore.getAvatarMeta(code, session.floor.holderId)
+    } : null;
+
+    const queueWithAvatar = sortedQueue.map(item => ({
+      ...item,
+      ...avatarStore.getAvatarMeta(code, item.id)
+    }));
+
+    const principalQueueWithAvatar = session.principalQueue.map(p => ({
+      ...p,
+      ...avatarStore.getAvatarMeta(code, p.id)
+    }));
 
     res.json({
       code: session.code,
       name: session.name,
       status: session.status,
-      floor: session.floor,
-      principalQueue: session.principalQueue,
-      queue: sortedQueue,
+      floor: floorWithAvatar,
+      principalQueue: principalQueueWithAvatar,
+      queue: queueWithAvatar,
       allAttendees,
       spokeHistory,
       principals: principalsList,
@@ -375,7 +399,7 @@ export function createApp() {
     const session = sessions.get(code);
     if (!session) return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
 
-    const { fairMode, fairFromMinutesBeforeEnd, sessionEndsAt, principalConnectMode } = req.body || {};
+    const { fairMode, fairFromMinutesBeforeEnd, sessionEndsAt, principalConnectMode, photos } = req.body || {};
     if (fairMode !== undefined && ['off', 'auto', 'on'].includes(fairMode)) {
       session.settings.fairMode = fairMode;
     }
@@ -388,6 +412,14 @@ export function createApp() {
     if (principalConnectMode !== undefined && ['on_demand', 'always'].includes(principalConnectMode)) {
       session.settings.principalConnectMode = principalConnectMode;
     }
+    if (photos !== undefined && ['on', 'speaker_only', 'off'].includes(photos)) {
+      session.settings.photos = photos;
+    }
+
+    broadcastToAll(code, {
+      type: 'settings_update',
+      settings: session.settings
+    });
 
     res.json({ settings: session.settings, fairModeActive: isFairModeActive(session) });
   });
@@ -752,6 +784,8 @@ export function createApp() {
       session.floor = null;
     }
 
+    avatarStore.deleteSession(code);
+
     const roomService = getRoomServiceClient();
     try {
       await roomService.deleteRoom(session.roomName);
@@ -763,6 +797,231 @@ export function createApp() {
       speakerCount: session.speakerCount,
       handsRaised: session.handsRaised
     });
+  });
+
+  // 15. Remove / Block Attendee (Admin only)
+  app.post('/api/sessions/:code/attendees/:id/remove', requireApiAuth(['admin']), async (req, res) => {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    const session = sessions.get(code);
+    if (!session) return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
+    const identity = req.params.id;
+
+    avatarStore.deleteAvatar(code, identity);
+    session.attendeeHands.delete(identity);
+    if (session.floor?.holderId === identity) {
+      session.floor = null;
+    }
+
+    try {
+      const roomService = getRoomServiceClient();
+      await roomService.removeParticipant(session.roomName, identity);
+    } catch {}
+
+    broadcastToAll(code, { type: 'avatar_deleted', identity, hasAvatar: false, avatarVersion: 0 });
+    res.json({ ok: true });
+  });
+
+  // --- Temporary Profile Photos (Avatars) ---
+
+  // 16. Upload Avatar: POST /api/avatar
+  app.post('/api/avatar', requireApiAuth(['admin', 'principal', 'attendee']), async (req, res) => {
+    const sessionCode = String(req.auth.code || req.body?.code || req.query.code || '').trim().toUpperCase();
+    const session = sessions.get(sessionCode);
+
+    if (!session) {
+      return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
+    }
+    if (session.status === 'ended') {
+      return res.status(410).json({ code: 'SESSION_ENDED', error: 'Session has ended' });
+    }
+
+    // Setting check: When photos === 'off', uploads are rejected with a clear code
+    if (session.settings?.photos === 'off') {
+      return res.status(403).json({
+        code: 'PHOTOS_DISABLED',
+        error: 'Profile photos are disabled for this session'
+      });
+    }
+
+    // Identity target: admin can set photo for any principal/participant; others set their own
+    let targetIdentity = req.auth.identity;
+    if (req.auth.role === 'admin' && (req.body?.targetIdentity || req.query.identity)) {
+      targetIdentity = req.body?.targetIdentity || req.query.identity;
+    }
+
+    // Rate limit: 5 uploads per minute per identity
+    if (!avatarStore.checkUploadRateLimit(sessionCode, targetIdentity)) {
+      return res.status(429).json({
+        code: 'RATE_LIMITED',
+        error: 'Upload limit exceeded. Maximum 5 uploads per minute.'
+      });
+    }
+
+    // Extract image buffer from binary or JSON body
+    let rawBuffer = null;
+    if (Buffer.isBuffer(req.body)) {
+      rawBuffer = req.body;
+    } else if (req.body && typeof req.body === 'object') {
+      const b64 = req.body.image || req.body.data;
+      if (typeof b64 === 'string') {
+        const clean = b64.includes('base64,') ? b64.split('base64,')[1] : b64;
+        try {
+          rawBuffer = Buffer.from(clean, 'base64');
+        } catch {
+          return res.status(400).json({ code: 'BAD_REQUEST', error: 'Invalid base64 image data' });
+        }
+      }
+    }
+
+    if (!rawBuffer || rawBuffer.length === 0) {
+      return res.status(400).json({ code: 'BAD_REQUEST', error: 'Image body is required' });
+    }
+
+    // Limit: 150 KB max
+    if (rawBuffer.length > MAX_AVATAR_BYTES) {
+      return res.status(413).json({
+        code: 'AVATAR_TOO_LARGE',
+        error: `Avatar image exceeds maximum limit of 150 KB (${rawBuffer.length} bytes received)`
+      });
+    }
+
+    // Magic bytes check (jpeg, webp, png)
+    const detectedMime = detectMagicBytes(rawBuffer);
+    if (!detectedMime) {
+      return res.status(400).json({
+        code: 'INVALID_IMAGE_TYPE',
+        error: 'Invalid image format. Only JPEG, PNG, or WebP images are allowed.'
+      });
+    }
+
+    // Re-encode with sharp to 256x256 WebP, quality ~80, metadata stripped
+    let processedBuffer;
+    try {
+      processedBuffer = await reencodeAvatar(rawBuffer);
+    } catch (err) {
+      console.error('Failed to process avatar with sharp:', err.message);
+      return res.status(500).json({ code: 'PROCESSING_ERROR', error: 'Failed to process image' });
+    }
+
+    // Store in-memory with session total 50 MB cap check
+    try {
+      const { version, updatedAt, size } = avatarStore.setAvatar(
+        sessionCode,
+        targetIdentity,
+        processedBuffer,
+        'image/webp'
+      );
+
+      // Broadcast update event to all connected sockets in session
+      broadcastToAll(sessionCode, {
+        type: 'avatar_updated',
+        identity: targetIdentity,
+        hasAvatar: true,
+        avatarVersion: version
+      });
+
+      return res.json({
+        ok: true,
+        identity: targetIdentity,
+        version,
+        size,
+        updatedAt
+      });
+    } catch (err) {
+      if (err.code === 'SESSION_AVATAR_CAP_EXCEEDED') {
+        return res.status(413).json({
+          code: 'SESSION_AVATAR_CAP_EXCEEDED',
+          error: 'Session avatar storage limit (50 MB) exceeded'
+        });
+      }
+      throw err;
+    }
+  });
+
+  // 17. Fetch Avatar: GET /api/avatar/:code/:identity
+  app.get('/api/avatar/:code/:identity', requireApiAuth(['admin', 'principal', 'attendee']), (req, res) => {
+    const sessionCode = String(req.params.code || '').trim().toUpperCase();
+    const identity = req.params.identity;
+    const session = sessions.get(sessionCode);
+
+    if (!session) {
+      return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
+    }
+
+    const { role: callerRole, identity: callerIdentity, code: tokenCode } = req.auth;
+    if (callerRole !== 'admin' && tokenCode && tokenCode !== sessionCode) {
+      return res.status(403).json({ code: 'FORBIDDEN', error: 'Token does not match session' });
+    }
+
+    // When photos === 'off', deny attendee requests
+    if (session.settings?.photos === 'off') {
+      return res.status(403).json({ code: 'PHOTOS_DISABLED', error: 'Profile photos are disabled for this session' });
+    }
+
+    // Role-based visibility check:
+    // - admin and principals may fetch any avatar
+    // - an attendee may fetch ONLY the current floor holder's avatar (and their own); otherwise 403.
+    if (callerRole === 'attendee') {
+      const isSelf = callerIdentity === identity;
+      const isFloorHolder = session.floor && session.floor.holderId === identity;
+
+      if (!isSelf && !isFloorHolder) {
+        return res.status(403).json({
+          code: 'FORBIDDEN',
+          error: 'Attendees may only view the current floor speaker photo or their own'
+        });
+      }
+    }
+
+    const avatar = avatarStore.getAvatar(sessionCode, identity);
+    if (!avatar) {
+      return res.status(404).json({ code: 'AVATAR_NOT_FOUND', error: 'Avatar not found' });
+    }
+
+    const etag = `W/"${avatar.version}"`;
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('ETag', etag);
+    res.setHeader('Content-Type', avatar.mime || 'image/webp');
+
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+
+    return res.send(avatar.bytes);
+  });
+
+  // 18. Delete Own Avatar: DELETE /api/avatar
+  app.delete('/api/avatar', requireApiAuth(['admin', 'principal', 'attendee']), (req, res) => {
+    const sessionCode = String(req.auth.code || req.query.code || '').trim().toUpperCase();
+    const identity = req.auth.identity;
+
+    avatarStore.deleteAvatar(sessionCode, identity);
+
+    broadcastToAll(sessionCode, {
+      type: 'avatar_deleted',
+      identity,
+      hasAvatar: false,
+      avatarVersion: 0
+    });
+
+    return res.json({ ok: true });
+  });
+
+  // 19. Admin Delete Any Avatar: DELETE /api/avatar/:identity
+  app.delete('/api/avatar/:identity', requireApiAuth(['admin']), (req, res) => {
+    const sessionCode = String(req.auth.code || req.query.code || '').trim().toUpperCase();
+    const identity = req.params.identity;
+
+    avatarStore.deleteAvatar(sessionCode, identity);
+
+    broadcastToAll(sessionCode, {
+      type: 'avatar_deleted',
+      identity,
+      hasAvatar: false,
+      avatarVersion: 0
+    });
+
+    return res.json({ ok: true });
   });
 
   return app;

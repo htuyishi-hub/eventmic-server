@@ -55,3 +55,17 @@ All host endpoints require header `x-host-passcode` matching `HOST_PASSCODE` (co
 - `POST /api/floor/mute`: Server-side track mute/unmute (Host).
 - `POST /api/sessions/:code/end`: Marks session ended, deletes LiveKit room, and returns duration/speaker stats (Host).
 - `GET /api/health`: Health check.
+
+---
+
+## Temporary Profile Photos (Avatars)
+
+Avatars are kept strictly in-memory (`Map<sessionCode, Map<identity, AvatarData>>`) and never written to disk or database.
+
+- **Upload (`POST /api/avatar`)**: Max 150 KB, magic-byte validated (JPEG, PNG, WebP), re-encoded with `sharp` to 256x256 WebP (~80 quality, metadata stripped). Rate limited to 5 uploads/min per identity. 50 MB session total cap.
+- **Fetch (`GET /api/avatar/:code/:identity`)**: Admin & Principals can fetch any avatar; Attendee can only fetch the current floor speaker's avatar or their own; otherwise 403 `FORBIDDEN`. Serves `Cache-Control: private, max-age=300` and ETag matching avatar version (304 supported).
+- **Delete (`DELETE /api/avatar`, `DELETE /api/avatar/:identity`)**: User can delete their own photo; Admin can delete any participant photo.
+- **Lifecycle Deletion**: All session avatars purged on session end, on participant removal/block, on server SIGINT/SIGTERM shutdown, and after 10 minutes of participant disconnection if they do not reconnect.
+- **Admin Settings (`photos: 'on' | 'speaker_only' | 'off'`)**: Default `speaker_only`. When `off`, uploads are blocked with 403 `PHOTOS_DISABLED`.
+- **WebSocket State**: Broadcast frames contain only `{ hasAvatar: boolean, avatarVersion: number }`, never raw image bytes.
+
