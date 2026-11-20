@@ -92,6 +92,32 @@ describe('Part A: Floor Rules, Roles, Reasons, Lists, and Fairness', () => {
         .set('Authorization', `Bearer ${adminToken}`);
       expect(revokeRes.status).toBe(200);
     });
+
+    it('rate limits and locks out after 5 failed PIN attempts with 429', async () => {
+      const { code } = await setupSession();
+
+      for (let i = 1; i <= 4; i++) {
+        const res = await request(app)
+          .post('/api/auth')
+          .send({ role: 'principal', code, pin: '000000' });
+        expect(res.status).toBe(401);
+        expect(res.body.code).toBe('UNAUTHORIZED');
+      }
+
+      // 5th failed attempt triggers 429 lockout
+      const lockedRes = await request(app)
+        .post('/api/auth')
+        .send({ role: 'principal', code, pin: '000000' });
+      expect(lockedRes.status).toBe(429);
+      expect(lockedRes.body.code).toBe('PIN_LOCKED');
+
+      // Subsequent attempt is also rejected with 429
+      const subsequentRes = await request(app)
+        .post('/api/auth')
+        .send({ role: 'principal', code, pin: '000000' });
+      expect(subsequentRes.status).toBe(429);
+      expect(subsequentRes.body.code).toBe('PIN_LOCKED');
+    });
   });
 
   describe('2. Floor Rules & Role Permissions', () => {

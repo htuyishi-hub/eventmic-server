@@ -20,6 +20,11 @@ import {
   signApiToken,
   timingSafeCompare
 } from './auth.js';
+import {
+  checkPinLockout,
+  recordFailedPinAttempt,
+  resetFailedPinAttempts
+} from './rateLimiter.js';
 import { getRoomServiceClient } from './roomService.js';
 import { getSessionMetrics } from './metrics.js';
 
@@ -145,13 +150,35 @@ export function createApp() {
 
     // B. Role: Principal (Speaker)
     if (role === 'principal') {
+      const pinRateKey = `${code}:${req.ip || 'global'}`;
+      const lockout = checkPinLockout(pinRateKey);
+      if (lockout.locked) {
+        const remainingSec = Math.ceil(lockout.remainingMs / 1000);
+        return res.status(429).json({
+          code: 'PIN_LOCKED',
+          error: `Too many incorrect PIN attempts. Locked for ${remainingSec} seconds.`
+        });
+      }
+
       if (!pin) {
         return res.status(401).json({ code: 'UNAUTHORIZED', error: '6-digit PIN is required for principal' });
       }
       const principal = findPrincipalByPin(code, pin);
       if (!principal) {
-        return res.status(401).json({ code: 'UNAUTHORIZED', error: 'Invalid principal PIN' });
+        const resFailed = recordFailedPinAttempt(pinRateKey, 5, 60000);
+        if (resFailed.locked) {
+          return res.status(429).json({
+            code: 'PIN_LOCKED',
+            error: 'Too many incorrect PIN attempts. Locked for 60 seconds.'
+          });
+        }
+        return res.status(401).json({
+          code: 'UNAUTHORIZED',
+          error: `Invalid principal PIN. ${5 - resFailed.attempts} attempt(s) remaining.`
+        });
       }
+
+      resetFailedPinAttempts(pinRateKey);
 
       const identity = principal.id;
       const pName = (typeof rawName === 'string' && rawName.trim()) ? rawName.trim() : principal.name;
