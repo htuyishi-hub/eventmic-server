@@ -32,6 +32,7 @@ import { createCorsOptions } from './cors.js';
 import { getRoomServiceClient } from './roomService.js';
 import { getSessionMetrics } from './metrics.js';
 import { avatarStore } from './avatarStore.js';
+import { listSchedules, createSchedule, getSchedule, deleteSchedule, advanceOrRemoveSchedule, VALID_RECURRENCE } from './scheduleStore.js';
 import { detectMagicBytes, reencodeAvatar, MAX_AVATAR_BYTES } from './avatarValidation.js';
 import { broadcastToAll } from './wsBroadcaster.js';
 
@@ -88,6 +89,47 @@ export function createApp() {
       livekitConfigured: isLiveKitConfigured,
       socketEnabled: true,
       sessions: sessions.size
+    });
+  });
+
+  // 0. Scheduled / Recurring Sessions Calendar (Admin)
+  app.get('/api/schedules', requireHostAuth, (_req, res) => {
+    res.json(listSchedules());
+  });
+
+  app.post('/api/schedules', requireHostAuth, (req, res) => {
+    const { title, startAt, durationMinutes, recurrence, settings } = req.body || {};
+    if (!title || typeof title !== 'string' || title.trim().length < 3 || title.trim().length > 60) {
+      return res.status(400).json({ code: 'BAD_REQUEST', error: 'Title must be between 3 and 60 characters' });
+    }
+    const ts = Date.parse(startAt);
+    if (!startAt || Number.isNaN(ts)) {
+      return res.status(400).json({ code: 'BAD_REQUEST', error: 'Valid startAt date/time is required' });
+    }
+    if (recurrence && !VALID_RECURRENCE.includes(recurrence)) {
+      return res.status(400).json({ code: 'BAD_REQUEST', error: 'Invalid recurrence' });
+    }
+    const item = createSchedule({ title, startAt, durationMinutes, recurrence, settings });
+    res.status(201).json(item);
+  });
+
+  app.delete('/api/schedules/:id', requireHostAuth, (req, res) => {
+    const ok = deleteSchedule(req.params.id);
+    if (!ok) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/schedules/:id/start', requireHostAuth, (req, res) => {
+    const sch = getSchedule(req.params.id);
+    if (!sch) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
+    const session = initSession(sch.title, { code: sch.code, settings: sch.settings });
+    const next = advanceOrRemoveSchedule(sch.id);
+    res.status(201).json({
+      code: session.code,
+      name: session.name,
+      createdAt: session.createdAt,
+      settings: session.settings,
+      nextOccurrence: next
     });
   });
 

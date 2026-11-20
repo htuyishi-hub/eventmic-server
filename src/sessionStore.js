@@ -41,8 +41,9 @@ export function generate6DigitPin() {
  * @param {string} name
  * @returns {Object}
  */
-export function initSession(name) {
-  const code = generateUniqueCode();
+export function initSession(name, opts = {}) {
+  const requested = opts.code && !sessions.has(opts.code) ? opts.code : null;
+  const code = requested || generateUniqueCode();
   const session = {
     code,
     name,
@@ -61,7 +62,9 @@ export function initSession(name) {
       fairFromMinutesBeforeEnd: 15,
       sessionEndsAt: null,
       principalConnectMode: 'on_demand', // 'on_demand' | 'always'
-      photos: 'speaker_only' // 'on' | 'speaker_only' | 'off'
+      photos: opts.settings?.photos || 'speaker_only',
+      ...(opts.settings?.fairMode ? { fairMode: opts.settings.fairMode } : {}),
+      ...(opts.settings?.turnCapSeconds ? { turnCapSeconds: opts.settings.turnCapSeconds } : {})
     },
     floorAllow: null // { principalId, expiresAt }
   };
