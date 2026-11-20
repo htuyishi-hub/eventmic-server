@@ -1,5 +1,6 @@
 import crypto from 'crypto';
-import { generateSessionCode } from './codes.js';
+import { UNAMBIGUOUS_CHARS } from './codes.js';
+function generateSessionCode(){let c='';for(let i=0;i<6;i++)c+=UNAMBIGUOUS_CHARS[Math.floor(Math.random()*UNAMBIGUOUS_CHARS.length)];return c;}
 
 const schedules = new Map();
 
