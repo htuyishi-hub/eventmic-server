@@ -17,6 +17,7 @@ import {
 } from './sessionStore.js';
 import {
   requireHostAuth,
+  resolveAdminFromRequest,
   requireApiAuth,
   signApiToken,
   timingSafeCompare
@@ -32,6 +33,7 @@ import { createCorsOptions } from './cors.js';
 import { getRoomServiceClient } from './roomService.js';
 import { getSessionMetrics } from './metrics.js';
 import { avatarStore } from './avatarStore.js';
+import { registerAdmin, authenticateAdmin } from './adminStore.js';
 import { listSchedules, createSchedule, getSchedule, deleteSchedule, advanceOrRemoveSchedule, VALID_RECURRENCE } from './scheduleStore.js';
 import { detectMagicBytes, reencodeAvatar, MAX_AVATAR_BYTES } from './avatarValidation.js';
 import { broadcastToAll } from './wsBroadcaster.js';
@@ -92,9 +94,47 @@ export function createApp() {
     });
   });
 
+  // -1. Multi-Admin Accounts (Sign Up / Sign In using API_TOKEN_SECRET JWTs)
+  app.post('/api/admins/register', (req, res) => {
+    try {
+      const admin = registerAdmin(req.body || {});
+      const adminToken = signApiToken({
+        role: 'organizer',
+        code: '*',
+        identity: admin.id,
+        name: admin.name,
+        email: admin.email,
+        exp: Math.floor(Date.now() / 1000) + 7 * 86400
+      });
+      res.status(201).json({ admin, adminToken });
+    } catch (err) {
+      res.status(err.status || 400).json({ code: err.code || 'BAD_REQUEST', error: err.message });
+    }
+  });
+
+  app.post('/api/admins/login', (req, res) => {
+    const admin = authenticateAdmin(req.body || {});
+    if (!admin) {
+      return res.status(401).json({ code: 'UNAUTHORIZED', error: 'Invalid email or password' });
+    }
+    const adminToken = signApiToken({
+      role: 'organizer',
+      code: '*',
+      identity: admin.id,
+      name: admin.name,
+      email: admin.email,
+      exp: Math.floor(Date.now() / 1000) + 7 * 86400
+    });
+    res.json({ admin, adminToken });
+  });
+
+  app.get('/api/admins/me', requireHostAuth, (req, res) => {
+    res.json({ admin: req.admin });
+  });
+
   // 0. Scheduled / Recurring Sessions Calendar (Admin)
-  app.get('/api/schedules', requireHostAuth, (_req, res) => {
-    res.json(listSchedules());
+  app.get('/api/schedules', requireHostAuth, (req, res) => {
+    res.json(listSchedules(req.admin.id));
   });
 
   app.post('/api/schedules', requireHostAuth, (req, res) => {
@@ -109,20 +149,20 @@ export function createApp() {
     if (recurrence && !VALID_RECURRENCE.includes(recurrence)) {
       return res.status(400).json({ code: 'BAD_REQUEST', error: 'Invalid recurrence' });
     }
-    const item = createSchedule({ title, startAt, durationMinutes, recurrence, settings });
+    const item = createSchedule({ ownerId: req.admin.id, title, startAt, durationMinutes, recurrence, settings });
     res.status(201).json(item);
   });
 
   app.delete('/api/schedules/:id', requireHostAuth, (req, res) => {
-    const ok = deleteSchedule(req.params.id);
+    const ok = deleteSchedule(req.params.id, req.admin.id);
     if (!ok) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
     res.json({ ok: true });
   });
 
   app.post('/api/schedules/:id/start', requireHostAuth, (req, res) => {
-    const sch = getSchedule(req.params.id);
+    const sch = getSchedule(req.params.id, req.admin.id);
     if (!sch) return res.status(404).json({ code: 'NOT_FOUND', error: 'Schedule not found' });
-    const session = initSession(sch.title, { code: sch.code, settings: sch.settings });
+    const session = initSession(sch.title, { code: sch.code, ownerId: req.admin.id, settings: sch.settings });
     const next = advanceOrRemoveSchedule(sch.id);
     res.status(201).json({
       code: session.code,
@@ -148,7 +188,7 @@ export function createApp() {
       });
     }
 
-    const session = initSession(name);
+    const session = initSession(name, { ownerId: req.admin.id });
     res.status(201).json({
       code: session.code,
       name: session.name,
@@ -198,15 +238,16 @@ export function createApp() {
 
     // A. Role: Admin
     if (role === 'admin') {
-      const provided = req.headers['x-host-passcode'] || passcode;
-      const expected = process.env.HOST_PASSCODE || '1234';
-
-      if (!provided || !timingSafeCompare(provided, expected)) {
-        return res.status(401).json({ code: 'UNAUTHORIZED', error: 'Invalid admin passcode' });
+      const admin = resolveAdminFromRequest(req);
+      if (!admin) {
+        return res.status(401).json({ code: 'UNAUTHORIZED', error: 'Invalid admin credentials or passcode' });
+      }
+      if (admin.isOrganizer && session.ownerId && session.ownerId !== 'default-host' && session.ownerId !== admin.id) {
+        return res.status(403).json({ code: 'FORBIDDEN', error: 'This session belongs to another admin' });
       }
 
       const identity = (rawRole === 'host' ? 'host-' : 'admin-') + Math.random().toString(36).substring(2, 10);
-      const adminName = (typeof rawName === 'string' && rawName.trim()) ? rawName.trim() : 'Admin';
+      const adminName = (typeof rawName === 'string' && rawName.trim()) ? rawName.trim() : (admin.name || 'Admin');
 
       const at = new AccessToken(apiKey, apiSecret, { identity, name: adminName, ttl: '6h' });
       at.addGrant({

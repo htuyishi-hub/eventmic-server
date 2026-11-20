@@ -46,6 +46,7 @@ export function initSession(name, opts = {}) {
   const code = requested || generateUniqueCode();
   const session = {
     code,
+    ownerId: opts.ownerId || 'default-host',
     name,
     roomName: `em-${code}`,
     createdAt: Date.now(),

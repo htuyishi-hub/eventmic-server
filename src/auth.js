@@ -41,6 +41,7 @@ export function signApiToken(claims, secret) {
     code: claims.code,
     identity: claims.identity,
     name: claims.name || '',
+    ...(claims.email ? { email: claims.email } : {}),
     exp
   })).toString('base64url');
 
@@ -78,17 +79,39 @@ export function verifyApiToken(token, secret) {
 /**
  * Express middleware to verify x-host-passcode (for admin passcode auth).
  */
-export function requireHostAuth(req, res, next) {
-  const provided = req.headers['x-host-passcode'] || req.body?.passcode;
-  const expected = process.env.HOST_PASSCODE || '1234';
-
-  if (!provided || !timingSafeCompare(provided, expected)) {
-    return res.status(401).json({
-      code: 'UNAUTHORIZED',
-      error: 'Invalid host/admin passcode'
-    });
+export function resolveAdminFromRequest(req) {
+  const authHeader = req.headers['authorization'] || '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const token = bearer || req.headers['x-admin-token'] || req.body?.adminToken;
+  if (token) {
+    const claims = verifyApiToken(token);
+    if (claims && claims.role === 'organizer') {
+      return {
+        id: claims.identity,
+        name: claims.name || 'Admin',
+        email: claims.email || '',
+        isOrganizer: true
+      };
+    }
   }
 
+  const provided = req.headers['x-host-passcode'] || req.body?.passcode;
+  const expected = process.env.HOST_PASSCODE || '1234';
+  if (provided && timingSafeCompare(provided, expected)) {
+    return { id: 'default-host', name: 'Host', email: '', isOrganizer: false };
+  }
+  return null;
+}
+
+export function requireHostAuth(req, res, next) {
+  const admin = resolveAdminFromRequest(req);
+  if (!admin) {
+    return res.status(401).json({
+      code: 'UNAUTHORIZED',
+      error: 'Invalid admin credentials or passcode'
+    });
+  }
+  req.admin = admin;
   next();
 }
 

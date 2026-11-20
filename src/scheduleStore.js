@@ -14,11 +14,13 @@ export function computeNextOccurrence(startAt, recurrence) {
   return d.toISOString();
 }
 
-export function listSchedules() {
-  return Array.from(schedules.values()).sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+export function listSchedules(ownerId) {
+  return Array.from(schedules.values())
+    .filter((s) => !ownerId || s.ownerId === ownerId)
+    .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
 }
 
-export function createSchedule({ title, startAt, durationMinutes = 60, recurrence = 'none', settings = {} }) {
+export function createSchedule({ ownerId = 'default-host', title, startAt, durationMinutes = 60, recurrence = 'none', settings = {} }) {
   const id = 'sch-' + crypto.randomBytes(6).toString('hex');
   const rec = VALID_RECURRENCE.includes(recurrence) ? recurrence : 'none';
   const existingCodes = new Set(Array.from(schedules.values()).map((s) => s.code));
@@ -27,6 +29,7 @@ export function createSchedule({ title, startAt, durationMinutes = 60, recurrenc
 
   const item = {
     id,
+    ownerId,
     code,
     title: String(title || '').trim(),
     startAt: new Date(startAt).toISOString(),
@@ -43,11 +46,17 @@ export function createSchedule({ title, startAt, durationMinutes = 60, recurrenc
   return item;
 }
 
-export function getSchedule(id) {
-  return schedules.get(id) || null;
+export function getSchedule(id, ownerId) {
+  const s = schedules.get(id);
+  if (!s) return null;
+  if (ownerId && s.ownerId !== ownerId) return null;
+  return s;
 }
 
-export function deleteSchedule(id) {
+export function deleteSchedule(id, ownerId) {
+  const s = schedules.get(id);
+  if (!s) return false;
+  if (ownerId && s.ownerId !== ownerId) return false;
   return schedules.delete(id);
 }
 
