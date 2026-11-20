@@ -25,13 +25,21 @@ import {
   recordFailedPinAttempt,
   resetFailedPinAttempts
 } from './rateLimiter.js';
+import { createRequire } from 'module';
+import { validateProductionEnv } from './env.js';
+import { createCorsOptions } from './cors.js';
 import { getRoomServiceClient } from './roomService.js';
 import { getSessionMetrics } from './metrics.js';
 
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
+
 export function createApp() {
+  validateProductionEnv();
+
   const app = express();
 
-  app.use(cors());
+  app.use(cors(createCorsOptions()));
   app.use(express.json());
 
   // Rate limiters
@@ -54,7 +62,28 @@ export function createApp() {
 
   // Health check
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: Date.now() });
+    let gitHash = '';
+    try {
+      const { execSync } = require('child_process');
+      gitHash = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch {}
+
+    const version = process.env.COMMIT_HASH || process.env.RENDER_GIT_COMMIT?.slice(0, 7) || gitHash || pkg.version;
+    const isLiveKitConfigured = Boolean(
+      process.env.LIVEKIT_URL &&
+      process.env.LIVEKIT_API_KEY &&
+      process.env.LIVEKIT_API_SECRET &&
+      process.env.LIVEKIT_API_KEY !== 'devkey'
+    );
+
+    res.json({
+      ok: true,
+      version,
+      uptimeSec: Math.floor(process.uptime()),
+      livekitConfigured: isLiveKitConfigured,
+      socketEnabled: true,
+      sessions: sessions.size
+    });
   });
 
   // 1. Create session (Admin)

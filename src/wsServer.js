@@ -19,11 +19,19 @@ import {
   startUrgentCapTimer,
   endTurn
 } from './wsTurnManager.js';
+import { isAllowedOrigin } from './cors.js';
 
 export function setupWebSocketServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on('upgrade', (request, socket, head) => {
+    const origin = request.headers['origin'];
+    if (!isAllowedOrigin(origin)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
     const parsedUrl = new URL(request.url, 'http://localhost');
     const pathname = parsedUrl.pathname;
     const query = Object.fromEntries(parsedUrl.searchParams.entries());

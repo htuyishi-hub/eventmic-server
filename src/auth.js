@@ -14,13 +14,26 @@ export function timingSafeCompare(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+function getTokenSecret(explicitSecret) {
+  if (explicitSecret) return explicitSecret;
+  const secret = process.env.API_TOKEN_SECRET || process.env.LIVEKIT_API_SECRET;
+  if (!secret || secret === 'secret') {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Missing required production secret: API_TOKEN_SECRET or LIVEKIT_API_SECRET');
+    }
+    return 'secret';
+  }
+  return secret;
+}
+
 /**
  * Signs an HMAC-SHA256 API token (JWT format).
- * @param {{ role: string, code: string, identity: string, exp?: number }} claims
+ * @param {{ role: string, code: string, identity: string, exp?: number, name?: string }} claims
  * @param {string} [secret]
  * @returns {string}
  */
-export function signApiToken(claims, secret = process.env.LIVEKIT_API_SECRET || 'secret') {
+export function signApiToken(claims, secret) {
+  const signingSecret = getTokenSecret(secret);
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const exp = claims.exp || Math.floor(Date.now() / 1000) + (claims.role === 'admin' ? 6 * 3600 : 3 * 3600);
   const body = Buffer.from(JSON.stringify({
@@ -31,7 +44,7 @@ export function signApiToken(claims, secret = process.env.LIVEKIT_API_SECRET || 
     exp
   })).toString('base64url');
 
-  const signature = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
+  const signature = crypto.createHmac('sha256', signingSecret).update(`${header}.${body}`).digest('base64url');
   return `${header}.${body}.${signature}`;
 }
 
@@ -41,13 +54,14 @@ export function signApiToken(claims, secret = process.env.LIVEKIT_API_SECRET || 
  * @param {string} [secret]
  * @returns {{ role: string, code: string, identity: string, exp: number, name?: string } | null}
  */
-export function verifyApiToken(token, secret = process.env.LIVEKIT_API_SECRET || 'secret') {
+export function verifyApiToken(token, secret) {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [header, body, signature] = parts;
 
-  const expectedSig = crypto.createHmac('sha256', secret).update(`${header}.${body}`).digest('base64url');
+  const verifySecret = getTokenSecret(secret);
+  const expectedSig = crypto.createHmac('sha256', verifySecret).update(`${header}.${body}`).digest('base64url');
   if (!timingSafeCompare(signature, expectedSig)) return null;
 
   try {
