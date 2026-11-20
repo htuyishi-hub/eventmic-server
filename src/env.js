@@ -26,8 +26,9 @@ export function validateProductionEnv(env = process.env) {
     errors.push('LIVEKIT_API_SECRET');
   }
 
+  const supabaseConfigured = Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY);
   if (!env.HOST_PASSCODE || !String(env.HOST_PASSCODE).trim()) {
-    errors.push('HOST_PASSCODE');
+    if (!supabaseConfigured) errors.push('HOST_PASSCODE');
   } else if (String(env.HOST_PASSCODE).trim() === '1234') {
     throw new Error('Insecure HOST_PASSCODE in production: default "1234" is rejected. Set a strong secret passcode.');
   }

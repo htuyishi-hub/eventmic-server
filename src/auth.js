@@ -96,7 +96,7 @@ export function resolveAdminFromRequest(req) {
   }
 
   const provided = req.headers['x-host-passcode'] || req.body?.passcode;
-  const expected = process.env.HOST_PASSCODE || '1234';
+  const expected = process.env.HOST_PASSCODE || (process.env.NODE_ENV === 'production' ? '' : '1234');
   if (provided && timingSafeCompare(provided, expected)) {
     return { id: 'default-host', name: 'Host', email: '', isOrganizer: false };
   }
