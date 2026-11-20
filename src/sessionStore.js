@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { UNAMBIGUOUS_CHARS } from './codes.js';
 import { avatarStore } from './avatarStore.js';
 
@@ -80,10 +81,12 @@ export function addPrincipal(code, name) {
 
   const id = 'prn-' + Math.random().toString(36).substring(2, 10);
   const pin = generate6DigitPin();
+  const inviteToken = crypto.randomBytes(12).toString('base64url');
   const principal = {
     id,
     name: name.trim(),
     pin,
+    inviteToken,
     createdAt: Date.now()
   };
   session.principals.set(id, principal);
@@ -123,6 +126,16 @@ export function revokePrincipal(code, principalId) {
  * @param {string} pin
  * @returns {Object | null}
  */
+export function findPrincipalByInviteToken(code, inviteToken) {
+  const session = sessions.get(code);
+  if (!session || !inviteToken) return null;
+  const clean = String(inviteToken).trim();
+  for (const p of session.principals.values()) {
+    if (p.inviteToken && p.inviteToken === clean) return p;
+  }
+  return null;
+}
+
 export function findPrincipalByPin(code, pin) {
   const session = sessions.get(code);
   if (!session || !pin) return null;

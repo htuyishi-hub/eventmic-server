@@ -9,6 +9,7 @@ import {
   regeneratePrincipalPin,
   revokePrincipal,
   findPrincipalByPin,
+  findPrincipalByInviteToken,
   getSortedAttendeeQueue,
   recordSpeakHistoryEnd,
   isFairModeActive,
@@ -131,7 +132,7 @@ export function createApp() {
 
   // 3. Issue LiveKit & API tokens: POST /api/auth (and alias POST /api/token)
   const handleAuth = async (req, res) => {
-    const { role: rawRole, code: rawCode, name: rawName, pin, passcode, identity: clientIdentity } = req.body || {};
+    const { role: rawRole, code: rawCode, name: rawName, pin, inviteToken, passcode, identity: clientIdentity } = req.body || {};
     let role = rawRole;
     if (role === 'host') role = 'admin'; // Normalize legacy host -> admin
 
@@ -181,37 +182,48 @@ export function createApp() {
       return res.json({ token, url: livekitUrl, apiToken, role: 'admin', identity, name: adminName });
     }
 
-    // B. Role: Principal (Speaker)
+    // B. Role: Principal (Speaker) — accepts either unique inviteToken (link) OR 6-digit PIN (app button)
     if (role === 'principal') {
-      const pinRateKey = `${code}:${req.ip || 'global'}`;
-      const lockout = checkPinLockout(pinRateKey);
-      if (lockout.locked) {
-        const remainingSec = Math.ceil(lockout.remainingMs / 1000);
-        return res.status(429).json({
-          code: 'PIN_LOCKED',
-          error: `Too many incorrect PIN attempts. Locked for ${remainingSec} seconds.`
-        });
-      }
-
-      if (!pin) {
-        return res.status(401).json({ code: 'UNAUTHORIZED', error: '6-digit PIN is required for principal' });
-      }
-      const principal = findPrincipalByPin(code, pin);
-      if (!principal) {
-        const resFailed = recordFailedPinAttempt(pinRateKey, 5, 60000);
-        if (resFailed.locked) {
-          return res.status(429).json({
-            code: 'PIN_LOCKED',
-            error: 'Too many incorrect PIN attempts. Locked for 60 seconds.'
+      let principal = null;
+      if (inviteToken) {
+        principal = findPrincipalByInviteToken(code, inviteToken);
+        if (!principal) {
+          return res.status(401).json({
+            code: 'INVALID_INVITE',
+            error: 'Invalid or revoked speaker invite link.'
           });
         }
-        return res.status(401).json({
-          code: 'UNAUTHORIZED',
-          error: `Invalid principal PIN. ${5 - resFailed.attempts} attempt(s) remaining.`
-        });
-      }
+      } else {
+        const pinRateKey = `${code}:${req.ip || 'global'}`;
+        const lockout = checkPinLockout(pinRateKey);
+        if (lockout.locked) {
+          const remainingSec = Math.ceil(lockout.remainingMs / 1000);
+          return res.status(429).json({
+            code: 'PIN_LOCKED',
+            error: `Too many incorrect PIN attempts. Locked for ${remainingSec} seconds.`
+          });
+        }
 
-      resetFailedPinAttempts(pinRateKey);
+        if (!pin) {
+          return res.status(401).json({ code: 'UNAUTHORIZED', error: '6-digit PIN is required for principal' });
+        }
+        principal = findPrincipalByPin(code, pin);
+        if (!principal) {
+          const resFailed = recordFailedPinAttempt(pinRateKey, 5, 60000);
+          if (resFailed.locked) {
+            return res.status(429).json({
+              code: 'PIN_LOCKED',
+              error: 'Too many incorrect PIN attempts. Locked for 60 seconds.'
+            });
+          }
+          return res.status(401).json({
+            code: 'UNAUTHORIZED',
+            error: `Invalid principal PIN. ${5 - resFailed.attempts} attempt(s) remaining.`
+          });
+        }
+
+        resetFailedPinAttempts(pinRateKey);
+      }
 
       const identity = principal.id;
       const pName = (typeof rawName === 'string' && rawName.trim()) ? rawName.trim() : principal.name;
