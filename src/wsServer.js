@@ -225,12 +225,14 @@ function sendInitialState(ws, session, role, identity) {
         id: p.id,
         name: p.name,
         pin: role === 'admin' ? p.pin : undefined,
+        inviteToken: role === 'admin' ? p.inviteToken : undefined,
         createdAt: p.createdAt,
         ...avatarStore.getAvatarMeta(session.code, p.id)
       })),
       settings: session.settings,
       fairModeActive: fairActive,
       attendeeCount,
+      messages: session.messages || [],
       metrics: role === 'admin' ? getSessionMetrics(session.code).getSnapshot() : undefined
     });
   }
@@ -453,6 +455,37 @@ async function handleClientMessage(msg, ws, session, code, identity, role) {
         broadcastToAll(code, { type: 'floor_update', floor: null });
         scheduleBatchedQueueBroadcast(session);
       }
+      break;
+    }
+
+    case 'chat_message': {
+      if (role !== 'admin' && role !== 'principal') {
+        sendToSocket(ws, { type: 'error', code: 'FORBIDDEN', message: 'Backstage chat is for admin and speakers only' });
+        break;
+      }
+      const text = typeof msg.text === 'string' ? msg.text.trim().slice(0, 500) : '';
+      const audioDataUrl = typeof msg.audioDataUrl === 'string' && msg.audioDataUrl.startsWith('data:audio/') && msg.audioDataUrl.length <= 300000
+        ? msg.audioDataUrl
+        : null;
+      if (!text && !audioDataUrl) break;
+
+      if (!Array.isArray(session.messages)) session.messages = [];
+      const entry = {
+        id: 'msg-' + Math.random().toString(36).slice(2, 9),
+        from: ws.displayName || (role === 'admin' ? 'Admin' : 'Speaker'),
+        fromRole: role,
+        fromId: identity,
+        to: msg.to || 'all',
+        text,
+        ...(audioDataUrl ? { audioDataUrl, durationMs: Number(msg.durationMs) || 0 } : {}),
+        ts: Date.now()
+      };
+      session.messages.push(entry);
+      if (session.messages.length > 100) session.messages.shift();
+
+      const payload = { type: 'messages', messages: session.messages };
+      broadcastToRole(code, 'admin', payload);
+      broadcastToRole(code, 'principal', payload);
       break;
     }
 
