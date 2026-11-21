@@ -58,6 +58,7 @@ export function initSession(name, opts = {}) {
     attendeeHands: new Map(), // id -> { id, name, reason, raisedAt, urgent }
     speakHistory: new Map(), // id -> { id, name, count, lastSpokeAt, totalSeconds, history: [] }
     principals: new Map(), // id -> { id, name, pin, createdAt }
+    messages: [], // backstage chat between admin & principals
     settings: {
       fairMode: 'off', // 'off' | 'auto' | 'on'
       fairFromMinutesBeforeEnd: 15,
