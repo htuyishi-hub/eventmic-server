@@ -10,6 +10,8 @@ import {
   revokePrincipal,
   findPrincipalByPin,
   findPrincipalByInviteToken,
+  persistSession,
+  removePersistedSession,
   getSortedAttendeeQueue,
   recordSpeakHistoryEnd,
   isFairModeActive,
@@ -520,6 +522,7 @@ export function createApp() {
       settings: session.settings
     });
 
+    persistSession(session);
     res.json({ settings: session.settings, fairModeActive: isFairModeActive(session) });
   });
 
@@ -871,6 +874,7 @@ export function createApp() {
     if (!session) return res.status(404).json({ code: 'INVALID_CODE', error: 'Session not found' });
 
     session.status = 'ended';
+    removePersistedSession(code);
     if (req.body?.handsRaised !== undefined) {
       session.handsRaised = Math.max(session.handsRaised, Number(req.body.handsRaised) || 0);
     }

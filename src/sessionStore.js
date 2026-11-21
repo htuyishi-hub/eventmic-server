@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { UNAMBIGUOUS_CHARS } from './codes.js';
+import { isSupabaseEnabled, sbSelect, sbInsert, sbUpdate, sbDelete } from './supabaseDb.js';
 import { avatarStore } from './avatarStore.js';
 
 export const VALID_REASONS = ['question', 'comment', 'compliment', 'clarification'];
@@ -41,6 +42,64 @@ export function generate6DigitPin() {
  * @param {string} name
  * @returns {Object}
  */
+export function persistSession(session) {
+  if (!isSupabaseEnabled() || !session) return;
+  const row = {
+    code: session.code,
+    owner_id: session.ownerId || 'default-host',
+    name: session.name,
+    room_name: session.roomName,
+    status: session.status || 'live',
+    settings: session.settings || {},
+    principals: Array.from(session.principals?.values?.() || []),
+    created_at: session.createdAt || Date.now()
+  };
+  sbUpdate('dm_sessions', `code=eq.${encodeURIComponent(session.code)}`, row)
+    .then((updated) => { if (!updated) return sbInsert('dm_sessions', row); })
+    .catch(() => {});
+}
+
+export function removePersistedSession(code) {
+  if (!isSupabaseEnabled() || !code) return;
+  sbDelete('dm_sessions', `code=eq.${encodeURIComponent(code)}`).catch(() => {});
+}
+
+export async function hydrateSessionsFromDb() {
+  if (!isSupabaseEnabled()) return 0;
+  try {
+    const rows = await sbSelect('dm_sessions', 'status=eq.live');
+    for (const r of rows) {
+      if (sessions.has(r.code)) continue;
+      const pMap = new Map();
+      if (Array.isArray(r.principals)) {
+        for (const p of r.principals) {
+          if (p?.id) pMap.set(p.id, p);
+        }
+      }
+      sessions.set(r.code, {
+        code: r.code,
+        ownerId: r.owner_id || 'default-host',
+        name: r.name,
+        roomName: r.room_name || `em-${r.code}`,
+        createdAt: Number(r.created_at) || Date.now(),
+        status: 'live',
+        speakerCount: 0,
+        handsRaised: 0,
+        floor: null,
+        principalQueue: [],
+        attendeeHands: new Map(),
+        speakHistory: new Map(),
+        principals: pMap,
+        messages: [],
+        settings: r.settings || { fairMode: 'off', photos: 'speaker_only' }
+      });
+    }
+    return rows.length;
+  } catch {
+    return 0;
+  }
+}
+
 export function initSession(name, opts = {}) {
   const requested = opts.code && !sessions.has(opts.code) ? opts.code : null;
   const code = requested || generateUniqueCode();
@@ -71,6 +130,7 @@ export function initSession(name, opts = {}) {
     floorAllow: null // { principalId, expiresAt }
   };
   sessions.set(code, session);
+  persistSession(session);
   return session;
 }
 
@@ -95,6 +155,7 @@ export function addPrincipal(code, name) {
     createdAt: Date.now()
   };
   session.principals.set(id, principal);
+  persistSession(session);
   return principal;
 }
 
@@ -110,6 +171,7 @@ export function regeneratePrincipalPin(code, principalId) {
   const p = session.principals.get(principalId);
   if (!p) return null;
   p.pin = generate6DigitPin();
+  persistSession(session);
   return p.pin;
 }
 
@@ -122,7 +184,9 @@ export function regeneratePrincipalPin(code, principalId) {
 export function revokePrincipal(code, principalId) {
   const session = sessions.get(code);
   if (!session) return false;
-  return session.principals.delete(principalId);
+  const ok = session.principals.delete(principalId);
+  if (ok) persistSession(session);
+  return ok;
 }
 
 /**
